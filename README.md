@@ -47,3 +47,10 @@ This project is a real-time chat application built entirely on the frontend, uti
 *   **Data Event Handling (`initial`, `added`, `updated`, `removed`):** Provides the necessary hooks to update the user interface granularly.
 
 This example illustrates how `gdb-p2p` can be a solid and efficient foundation for building decentralized, real-time collaborative web applications with relative simplicity.
+
+[dGroup Demo](https://estebanrfp.github.io/dGroup/) Powered by [GraphDB (GDB)](https://github.com/estebanrfp/gdb)
+
+-------------
+
+#### Credits
+[by Esteban Fuster Pozzi (estebanrfp)](https://github.com/estebanrfp)
