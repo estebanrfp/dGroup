@@ -1,5 +1,5 @@
 
-import { GraphDB } from "https://cdn.jsdelivr.net/npm/gdb-p2p/+esm";
+import { GDB } from "https://cdn.jsdelivr.net/npm/gdb-p2p/+esm";
 import 'https://cdn.jsdelivr.net/npm/emoji-picker-element@^1/index.js';
 
 const DB_NAME = '5chat-advanced-db-v4';
@@ -11,7 +11,7 @@ const INITIAL_MESSAGES_TO_SHOW = 15;
 const MESSAGES_PER_LOAD_MORE = 10;
 const RECENT_MESSAGES_LIMIT = 5;
 
-let db = new GraphDB(DB_NAME);
+let db = new GDB(DB_NAME);
 let currentUser = null;
 
 let allMessagesData = [];
