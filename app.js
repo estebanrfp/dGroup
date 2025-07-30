@@ -1,5 +1,5 @@
 
-import { GDB } from "https://cdn.jsdelivr.net/npm/gdb-p2p/+esm";
+import { GDB } from "https://cdn.jsdelivr.net/npm/genosdb/+esm";
 import 'https://cdn.jsdelivr.net/npm/emoji-picker-element@^1/index.js';
 
 const DB_NAME = '5chat-advanced-db-v4';
