@@ -1,5 +1,5 @@
 
-import { GDB } from "https://cdn.jsdelivr.net/npm/genosdb/+esm";
+import { gdb } from "https://cdn.jsdelivr.net/npm/genosdb@latest/dist/index.min.js";
 import 'https://cdn.jsdelivr.net/npm/emoji-picker-element@^1/index.js';
 
 const DB_NAME = '5chat-advanced-db-v4';
@@ -11,13 +11,13 @@ const INITIAL_MESSAGES_TO_SHOW = 15;
 const MESSAGES_PER_LOAD_MORE = 10;
 const RECENT_MESSAGES_LIMIT = 5;
 
-let db = new GDB(DB_NAME);
+const db = await gdb(DB_NAME);
 let currentUser = null;
 
 let allMessagesData = [];
-let displayedMessageIds = new Set();
+const displayedMessageIds = new Set();
 let currentSearchTerm = "";
-let uniqueSenders = new Set();
+const uniqueSenders = new Set();
 let unsubscribeFromMainMessages = null;
 let unsubscribeFromRecentMessages = null;
 let isInitialLoad = true;
@@ -42,17 +42,17 @@ const searchMessagesInput = document.getElementById('search-messages-input');
 const loadOlderMessagesBtn = document.getElementById('load-older-messages-btn');
 const recentMessagesListElement = document.getElementById('recent-messages-list');
 
-function formatTime(timestamp) {
+const formatTime = (timestamp) => {
   const date = new Date(timestamp);
   return date.toLocaleTimeString(navigator.language, { hour: '2-digit', minute: '2-digit', hour12: false });
-}
+};
 
 const avatarColors = [
   '#FF6B6B', '#4ECDC4', '#45B7D1', '#FED766', '#2AB7CA',
   '#F0B67F', '#FE4A49', '#547980', '#A7226E', '#F479A3',
   '#795548', '#FFC107', '#8BC34A', '#00BCD4', '#E91E63'
 ];
-function getAvatarDetails(username) {
+const getAvatarDetails = (username) => {
   if (!username) username = "?"; // Default for null/empty username
   const nameParts = username.trim().split(/\s+/);
   let initials = nameParts[0] ? nameParts[0][0].toUpperCase() : '?';
@@ -69,21 +69,21 @@ function getAvatarDetails(username) {
   }
   const colorIndex = Math.abs(hash) % avatarColors.length;
   return { initials, color: avatarColors[colorIndex] };
-}
+};
 
-function applyTheme(theme) {
+const applyTheme = (theme) => {
   document.body.classList.toggle('dark-mode', theme === 'dark');
   themeIconSun.style.display = theme === 'dark' ? 'block' : 'none';
   themeIconMoon.style.display = theme === 'dark' ? 'none' : 'block';
   emojiPicker.setAttribute('theme', theme);
   localStorage.setItem(THEME_STORAGE_KEY, theme);
-}
+};
 themeToggleBtn.addEventListener('click', () => {
   const currentTheme = document.body.classList.contains('dark-mode') ? 'dark' : 'light';
   applyTheme(currentTheme === 'dark' ? 'light' : 'dark');
 });
 
-function loadUser() {
+const loadUser = () => {
   const storedUser = localStorage.getItem(USERNAME_STORAGE_KEY);
   if (storedUser) {
     currentUser = storedUser;
@@ -96,9 +96,9 @@ function loadUser() {
     changeUserBtn.style.display = 'none';
     whoInput.focus();
   }
-}
+};
 
-function setUser(username) {
+const setUser = (username) => {
   const newUsername = username.trim();
   if (newUsername) {
     const oldUser = currentUser;
@@ -110,20 +110,20 @@ function setUser(username) {
     whatInput.focus();
 
     if (oldUser !== currentUser) {
-      // Si el usuario es nuevo o cambió, se re-suscribe.
-      // `subscribeToAllMessages` limpiará los datos existentes y recargará todo
-      // aplicando el nuevo `currentUser` a los mensajes.
+      // If the user is new or changed, re-subscribe.
+      // `subscribeToAllMessages` will clear existing data and reload everything
+      // applying the new `currentUser` to the messages.
       subscribeToAllMessages();
     } else {
-      // Si el usuario es el mismo que antes (por ejemplo, re-ingresó el nombre)
-      // y la suscripción ya está activa (lo cual debería ser por el `Initial Load`),
-      // solo necesitamos refrescar las vistas para asegurar la correcta estilización.
+      // If the user is the same as before (e.g., re-entered the name)
+      // and the subscription is already active (should be from `Initial Load`),
+      // just refresh the views to ensure correct styling.
       refreshMainMessageDisplay();
       renderUserList();
-      // El panel de recientes se actualiza por su propia suscripción.
+      // The recent panel updates via its own subscription.
     }
   }
-}
+};
 
 changeUserBtn.onclick = () => {
   localStorage.removeItem(USERNAME_STORAGE_KEY);
@@ -143,21 +143,21 @@ changeUserBtn.onclick = () => {
   // renderRecentMessages([]); // Opcional: limpiar explícitamente
 };
 
-function scrollToBottom(force = false) {
+const scrollToBottom = (force = false) => {
   const isScrolledToBottom = messagesListElement.scrollHeight - messagesListElement.clientHeight <= messagesListElement.scrollTop + 150;
   if (force || isScrolledToBottom) {
     messagesListElement.scrollTop = messagesListElement.scrollHeight;
   }
-}
-function preserveScrollPosition(callback) {
+};
+const preserveScrollPosition = (callback) => {
   const oldScrollTop = messagesListElement.scrollTop;
   const oldScrollHeight = messagesListElement.scrollHeight;
   callback();
   const newScrollHeight = messagesListElement.scrollHeight;
   messagesListElement.scrollTop = oldScrollTop + (newScrollHeight - oldScrollHeight);
-}
+};
 
-function createMessageElement(id, value, isCurrentUserMessage) {
+const createMessageElement = (id, value, isCurrentUserMessage) => {
   if (!value || !value.content || typeof value.sender === 'undefined') {
     console.warn(`Mensaje con ID ${id} tiene datos incompletos:`, value);
     return null;
@@ -218,7 +218,7 @@ function createMessageElement(id, value, isCurrentUserMessage) {
   return messageLi;
 }
 
-function refreshMainMessageDisplay() {
+const refreshMainMessageDisplay = () => {
   const isUserNearBottom = messagesListElement.scrollHeight - messagesListElement.clientHeight <= messagesListElement.scrollTop + 150;
 
   messagesListElement.innerHTML = '';
@@ -258,7 +258,7 @@ function refreshMainMessageDisplay() {
   loadOlderMessagesBtn.disabled = !canLoadMore;
 }
 
-async function subscribeToAllMessages() {
+const subscribeToAllMessages = async () => {
   if (unsubscribeFromMainMessages) unsubscribeFromMainMessages();
   if (unsubscribeFromRecentMessages) unsubscribeFromRecentMessages();
 
@@ -332,7 +332,7 @@ async function subscribeToAllMessages() {
   unsubscribeFromRecentMessages = recentUnsub;
 }
 
-function renderRecentMessages(recentMessagesArray) {
+const renderRecentMessages = (recentMessagesArray) => {
   recentMessagesListElement.innerHTML = '';
   recentMessagesArray.forEach(msgData => {
     const li = document.createElement('li');
@@ -360,7 +360,7 @@ function renderRecentMessages(recentMessagesArray) {
   });
 }
 
-async function sendMessage(contentPayload) {
+const sendMessage = async (contentPayload) => {
   if (!currentUser) {
     alert("Establece tu nombre primero para poder enviar mensajes.");
     whoInput.focus();
@@ -428,11 +428,11 @@ imageFileInput.addEventListener('change', (event) => {
   } else if (file) { alert("Archivo de imagen no válido."); imageFileInput.value = ''; }
 });
 
-function showFullImage(src) { modalImageContent.src = src; imageModal.style.display = 'flex'; }
-imageModalCloseBtn.onclick = () => { imageModal.style.display = 'none'; modalImageContent.src = ''; }
-imageModal.onclick = (event) => { if (event.target === imageModal) { imageModal.style.display = 'none'; modalImageContent.src = ''; } }
+const showFullImage = (src) => { modalImageContent.src = src; imageModal.style.display = 'flex'; };
+imageModalCloseBtn.onclick = () => { imageModal.style.display = 'none'; modalImageContent.src = ''; };
+imageModal.onclick = (event) => { if (event.target === imageModal) { imageModal.style.display = 'none'; modalImageContent.src = ''; } };
 
-function renderUserList() {
+const renderUserList = () => {
   connectedUsersListElement.innerHTML = '';
   const sortedSenders = Array.from(uniqueSenders).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
 
