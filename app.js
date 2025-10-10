@@ -11,7 +11,7 @@ const INITIAL_MESSAGES_TO_SHOW = 15;
 const MESSAGES_PER_LOAD_MORE = 10;
 const RECENT_MESSAGES_LIMIT = 5;
 
-const db = await gdb(DB_NAME);
+const db = await gdb(DB_NAME, { rtc: true });
 let currentUser = null;
 
 let allMessagesData = [];
