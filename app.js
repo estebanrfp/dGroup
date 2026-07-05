@@ -1,492 +1,377 @@
+// dGroup — a P2P group chat on GenosDB with engine-powered full-text search.
+//
+// What this example demonstrates, end to end:
+//   • Signed messages (like dChat) PLUS the query engine at work: full-text
+//     search runs through the engine's $text operator — accent-folding,
+//     field-level — and any sender can be filtered with one click.
+//   • A "recent activity" sidebar widget driven by a second live subscription
+//     with $limit: the engine manages the realtime window itself.
+//   • Zero-trust + Governance: guest reads → member chats (~10 s) →
+//     moderator deletes any message (10 messages sent).
+//   • GenosDB Design Guide patterns: tokens (dark), identity in a centered
+//     <dialog>, session top-right as `0x… [role]`, toasts.
+import { gdb } from "https://cdn.jsdelivr.net/npm/genosdb@latest/dist/index.min.js"
 
-import { gdb } from "https://cdn.jsdelivr.net/npm/genosdb@latest/dist/index.min.js";
-import 'https://cdn.jsdelivr.net/npm/emoji-picker-element@^1/index.js';
+// ============================== Configuration ==============================
 
-const DB_NAME = '5chat-advanced-db-v4';
-const USERNAME_STORAGE_KEY = 'chatAdvancedUsernameV4';
-const THEME_STORAGE_KEY = 'chatAdvancedThemeV4';
-const MESSAGE_TYPE = 'chat-message-v11';
+const DB_NAME = "dgroup" // database name = P2P room name
 
-const INITIAL_MESSAGES_TO_SHOW = 15;
-const MESSAGES_PER_LOAD_MORE = 10;
-const RECENT_MESSAGES_LIMIT = 5;
+// Demo superadmin — SHOWCASE ONLY (public mnemonic). Replace for real use.
+const DEMO_SUPERADMIN = {
+  address: "0xbfDe0eCEC5332Fd86D2570085571D6051Df098dA",
+  mnemonic: "panic now afford carbon donate lecture drift excite collect essay stuff prosper",
+}
 
-const db = await gdb(DB_NAME, { rtc: true });
-let currentUser = null;
+const ROLES = {
+  superadmin: { can: ["assignRole"], inherits: ["moderator"] }, // signs promotions
+  moderator: { can: ["delete", "deleteAny"], inherits: ["member"] }, // cleans up
+  member: { can: ["write", "link", "sync"], inherits: ["guest"] }, // chats
+  guest: { can: ["read", "sync"] }, // reads only
+}
 
-let allMessagesData = [];
-const displayedMessageIds = new Set();
-let currentSearchTerm = "";
-const uniqueSenders = new Set();
-let unsubscribeFromMainMessages = null;
-let unsubscribeFromRecentMessages = null;
-let isInitialLoad = true;
+const MEMBER = { $in: ["member", "moderator"] }
+const GOVERNANCE_RULES = [
+  { if: { role: "guest" }, offsetTimestamp: 10000, then: { assignRole: "member" } }, // onboarding gate
+  { if: { role: MEMBER }, then: { assignRole: "member" } }, // floor
+  { if: { role: MEMBER, messagesSent: { $gte: 10 } }, then: { assignRole: "moderator" } }, // climb
+]
 
-const messagesListElement = document.getElementById('messages-list');
-const messageFormElement = document.getElementById('message-form');
-const whoInput = document.getElementById('who');
-const whatInput = document.getElementById('what');
-const changeUserBtn = document.getElementById('change-user-btn');
-const emojiBtn = document.getElementById('emoji-btn');
-const emojiPicker = document.querySelector('emoji-picker');
-const imageUploadBtn = document.getElementById('image-upload-btn');
-const imageFileInput = document.getElementById('image-file-input');
-const themeToggleBtn = document.getElementById('theme-toggle-btn');
-const themeIconSun = document.getElementById('theme-icon-sun');
-const themeIconMoon = document.getElementById('theme-icon-moon');
-const imageModal = document.getElementById('image-modal');
-const modalImageContent = document.getElementById('modal-image-content');
-const imageModalCloseBtn = document.getElementById('image-modal-close');
-const connectedUsersListElement = document.getElementById('connected-users-list');
-const searchMessagesInput = document.getElementById('search-messages-input');
-const loadOlderMessagesBtn = document.getElementById('load-older-messages-btn');
-const recentMessagesListElement = document.getElementById('recent-messages-list');
+// ================================ Database =================================
 
-const formatTime = (timestamp) => {
-  const date = new Date(timestamp);
-  return date.toLocaleTimeString(navigator.language, { hour: '2-digit', minute: '2-digit', hour12: false });
-};
+const db = await gdb(DB_NAME, {
+  rtc: true, // required by the Security Manager
+  sm: {
+    superAdmins: [DEMO_SUPERADMIN.address],
+    customRoles: ROLES,
+    governanceRules: GOVERNANCE_RULES,
+    acls: true, // each message is owned by its author
+  },
+})
+globalThis.db = db // console handle (matches the official examples)
 
-const avatarColors = [
-  '#FF6B6B', '#4ECDC4', '#45B7D1', '#FED766', '#2AB7CA',
-  '#F0B67F', '#FE4A49', '#547980', '#A7226E', '#F479A3',
-  '#795548', '#FFC107', '#8BC34A', '#00BCD4', '#E91E63'
-];
-const getAvatarDetails = (username) => {
-  if (!username) username = "?"; // Default for null/empty username
-  const nameParts = username.trim().split(/\s+/);
-  let initials = nameParts[0] ? nameParts[0][0].toUpperCase() : '?';
-  if (nameParts.length > 1 && nameParts[1]) {
-    initials += nameParts[1][0].toUpperCase();
-  } else if (nameParts[0] && nameParts[0].length > 1) {
-    initials = nameParts[0].substring(0, 2).toUpperCase();
+// ================================ Helpers ==================================
+
+const $ = (id) => document.getElementById(id)
+
+const toast = (msg, isError = false) => {
+  const el = $("toast")
+  el.textContent = msg
+  el.className = `toast show${isError ? " error" : ""}`
+  clearTimeout(toast._t)
+  toast._t = setTimeout(() => (el.className = "toast"), 3200)
+}
+
+// =============================== Identity ==================================
+
+let myAddress = null
+let myRole = null
+let myName = null
+let unsubRole = null
+
+const can = (permission) => {
+  let role = myRole
+  while (role && ROLES[role]) {
+    if (ROLES[role].can.includes(permission)) return true
+    role = ROLES[role].inherits?.[0]
   }
+  return false
+}
 
-  let hash = 0;
-  for (let i = 0; i < username.length; i++) {
-    hash = username.charCodeAt(i) + ((hash << 5) - hash);
-    hash = hash & hash;
-  }
-  const colorIndex = Math.abs(hash) % avatarColors.length;
-  return { initials, color: avatarColors[colorIndex] };
-};
+const applyPermissionsToUI = () => {
+  const writable = can("write")
+  $("what").disabled = !writable
+  $("sendBtn").disabled = !writable
+  $("what").placeholder = writable ? "Message the group…"
+    : myAddress ? "Your member role is on its way (~10 s while a superadmin is online)…"
+    : "Sign in (top right) to chat — reading is free."
+  refreshDeleteButtons()
+}
 
-const applyTheme = (theme) => {
-  document.body.classList.toggle('dark-mode', theme === 'dark');
-  themeIconSun.style.display = theme === 'dark' ? 'block' : 'none';
-  themeIconMoon.style.display = theme === 'dark' ? 'none' : 'block';
-  emojiPicker.setAttribute('theme', theme);
-  localStorage.setItem(THEME_STORAGE_KEY, theme);
-};
-themeToggleBtn.addEventListener('click', () => {
-  const currentTheme = document.body.classList.contains('dark-mode') ? 'dark' : 'light';
-  applyTheme(currentTheme === 'dark' ? 'light' : 'dark');
-});
-
-const loadUser = () => {
-  const storedUser = localStorage.getItem(USERNAME_STORAGE_KEY);
-  if (storedUser) {
-    currentUser = storedUser;
-    whoInput.value = currentUser;
-    whoInput.disabled = true;
-    changeUserBtn.style.display = 'inline-block';
-    whatInput.focus();
+db.sm.setSecurityStateChangeCallback((state) => {
+  if (state.isActive) {
+    myAddress = state.activeAddress
+    $("identityModal").close()
+    $("identityPanel").style.display = "none"
+    $("sessionBar").style.display = "flex"
+    $("whoami").textContent = state.abbrAddr
+    watchMyRole()
   } else {
-    whoInput.disabled = false;
-    changeUserBtn.style.display = 'none';
-    whoInput.focus();
+    unsubRole?.(); unsubRole = null
+    myAddress = myRole = myName = null
+    $("sessionBar").style.display = "none"
+    $("identityPanel").style.display = "block"
+    $("mnemonicBox").readOnly = false
+    $("generateBtn").style.display = "inline-block"
+    $("protectBtn").style.display = "none"
+    $("webauthnLoginBtn").style.display = db.sm.hasExistingWebAuthnRegistration() ? "inline-block" : "none"
+    queueMicrotask(() => applyPermissionsToUI())
   }
-};
+})
 
-const setUser = (username) => {
-  const newUsername = username.trim();
-  if (newUsername) {
-    const oldUser = currentUser;
-    currentUser = newUsername;
-    localStorage.setItem(USERNAME_STORAGE_KEY, currentUser);
-    whoInput.value = currentUser;
-    whoInput.disabled = true;
-    changeUserBtn.style.display = 'inline-block';
-    whatInput.focus();
-
-    if (oldUser !== currentUser) {
-      // If the user is new or changed, re-subscribe.
-      // `subscribeToAllMessages` will clear existing data and reload everything
-      // applying the new `currentUser` to the messages.
-      subscribeToAllMessages();
-    } else {
-      // If the user is the same as before (e.g., re-entered the name)
-      // and the subscription is already active (should be from `Initial Load`),
-      // just refresh the views to ensure correct styling.
-      refreshMainMessageDisplay();
-      renderUserList();
-      // The recent panel updates via its own subscription.
+const watchMyRole = async () => {
+  unsubRole?.()
+  const { unsubscribe } = await db.get(`user:${myAddress}`, (node) => {
+    const nextRole = node?.value?.role ?? "guest"
+    myName = node?.value?.displayName ?? null
+    $("nameInput").value = myName ?? ""
+    if (nextRole !== myRole) {
+      myRole = nextRole
+      $("myRole").textContent = myRole
+      $("myRole").dataset.role = myRole
+      applyPermissionsToUI()
     }
-  }
-};
+  })
+  unsubRole = unsubscribe
+}
 
-changeUserBtn.onclick = () => {
-  localStorage.removeItem(USERNAME_STORAGE_KEY);
-  currentUser = null;
-  whoInput.value = '';
-  whoInput.disabled = false;
-  changeUserBtn.style.display = 'none';
-  whoInput.focus();
-  if (emojiPicker.style.display !== 'none') emojiPicker.style.display = 'none';
+$("nameInput").addEventListener("change", async () => {
+  const name = $("nameInput").value.trim().slice(0, 24)
+  if (!myAddress || !name || name === myName) return
+  const id = `user:${myAddress}`
+  const { result } = await db.get(id)
+  await db.put({ ...result.value, displayName: name }, id) // spread keeps `role`!
+  toast(`You are now "${name}"`)
+})
 
-  // Las suscripciones (main y recent) siguen activas para ver mensajes.
-  // Solo actualizamos la UI para reflejar que no hay un usuario "activo".
-  refreshMainMessageDisplay();
-  renderUserList();
-  // `renderRecentMessages` se actualizará a través de su propia suscripción,
-  // pero podemos forzar una limpieza o dejarlo.
-  // renderRecentMessages([]); // Opcional: limpiar explícitamente
-};
+// --- Identity modal (three-phase state machine, see the Design Guide) ---
+
+$("openLoginBtn").onclick = () => $("identityModal").showModal()
+$("closeModalBtn").onclick = () => $("identityModal").close()
+$("identityModal").onclick = (e) => { if (e.target === $("identityModal")) $("identityModal").close() }
+
+$("generateBtn").onclick = async () => {
+  const identity = await db.sm.startNewUserRegistration()
+  if (!identity) return toast("Could not generate an identity", true)
+  const box = $("mnemonicBox")
+  box.value = identity.mnemonic
+  box.readOnly = true
+  $("generateBtn").style.display = "none"
+  $("protectBtn").style.display = "inline-block"
+  toast("SAVE THIS PHRASE — it is your only way back into this identity")
+}
+
+$("copyBtn").onclick = async () => {
+  const phrase = $("mnemonicBox").value.trim()
+  if (!phrase) return
+  await navigator.clipboard.writeText(phrase)
+  toast("Phrase copied to clipboard")
+}
+
+$("loginBtn").onclick = async () => {
+  const phrase = $("mnemonicBox").value.trim()
+  if (!phrase) return toast("Paste (or generate) a mnemonic first", true)
+  const identity = await db.sm.loginOrRecoverUserWithMnemonic(phrase)
+  identity ? toast(`Welcome ${db.sm.abbrAddr(identity.address)}`) : toast("Login failed", true)
+}
+
+$("protectBtn").onclick = async () => {
+  const address = await db.sm.protectCurrentIdentityWithWebAuthn()
+  address ? toast("Identity protected with a passkey") : toast("Passkey protection failed (HTTPS required)", true)
+}
+
+$("webauthnLoginBtn").onclick = async () => {
+  const address = await db.sm.loginCurrentUserWithWebAuthn()
+  if (!address) toast("Passkey login failed", true)
+}
+
+$("superadminBtn").onclick = () => db.sm.loginOrRecoverUserWithMnemonic(DEMO_SUPERADMIN.mnemonic)
+$("logoutBtn").onclick = () => db.sm.clearSecurity()
+
+// =========================== Live feed (default) ===========================
+
+const list = $("messagesList")
+let scrollTimer = null
+let searchMode = false
 
 const scrollToBottom = (force = false) => {
-  const isScrolledToBottom = messagesListElement.scrollHeight - messagesListElement.clientHeight <= messagesListElement.scrollTop + 150;
-  if (force || isScrolledToBottom) {
-    messagesListElement.scrollTop = messagesListElement.scrollHeight;
+  if (force || list.scrollHeight - list.clientHeight <= list.scrollTop + 150) {
+    list.scrollTop = list.scrollHeight
   }
-};
-const preserveScrollPosition = (callback) => {
-  const oldScrollTop = messagesListElement.scrollTop;
-  const oldScrollHeight = messagesListElement.scrollHeight;
-  callback();
-  const newScrollHeight = messagesListElement.scrollHeight;
-  messagesListElement.scrollTop = oldScrollTop + (newScrollHeight - oldScrollHeight);
-};
-
-const createMessageElement = (id, value, isCurrentUserMessage) => {
-  if (!value || !value.content || typeof value.sender === 'undefined') {
-    console.warn(`Mensaje con ID ${id} tiene datos incompletos:`, value);
-    return null;
-  }
-
-  const messageLi = document.createElement("li");
-  messageLi.id = id;
-  messageLi.className = 'message-item';
-  messageLi.classList.toggle('user', isCurrentUserMessage);
-  messageLi.classList.toggle('other', !isCurrentUserMessage);
-  messageLi.dataset.timestamp = value.timestamp;
-
-  const senderElement = document.createElement('div');
-  senderElement.className = 'message-sender';
-  senderElement.textContent = value.sender;
-
-  const contentWrapper = document.createElement('div');
-  contentWrapper.className = 'message-content-wrapper';
-
-  let isImageOnly = false;
-  if (value.content.type === 'text') {
-    const textNode = document.createElement('span');
-    textNode.textContent = value.content.value;
-    contentWrapper.appendChild(textNode);
-  } else if (value.content.type === 'image') {
-    isImageOnly = true;
-    const imgContainer = document.createElement('div');
-    imgContainer.className = 'message-image-container';
-    const imgElement = document.createElement('img');
-    imgElement.src = value.content.value;
-    imgElement.alt = value.content.filename || 'Imagen';
-    imgElement.onload = () => scrollToBottom();
-    imgElement.onclick = () => showFullImage(value.content.value);
-    imgContainer.appendChild(imgElement);
-    contentWrapper.appendChild(imgContainer);
-    if (value.content.text && value.content.text.trim() !== '') {
-      isImageOnly = false;
-      const textNode = document.createElement('p');
-      textNode.textContent = value.content.text;
-      textNode.style.marginTop = '5px';
-      contentWrapper.appendChild(textNode);
-    }
-  } else {
-    contentWrapper.textContent = `[Contenido desconocido: ${value.content.type || 'N/A'}]`;
-  }
-
-  if (isImageOnly) {
-    contentWrapper.classList.add('image-only');
-  }
-
-  const timestampElement = document.createElement('span');
-  timestampElement.className = 'message-timestamp';
-  timestampElement.textContent = formatTime(value.timestamp);
-  contentWrapper.appendChild(timestampElement);
-
-  messageLi.appendChild(senderElement);
-  messageLi.appendChild(contentWrapper);
-  return messageLi;
 }
 
-const refreshMainMessageDisplay = () => {
-  const isUserNearBottom = messagesListElement.scrollHeight - messagesListElement.clientHeight <= messagesListElement.scrollTop + 150;
+const buildMessage = (id, m) => {
+  const mine = myAddress && m.sender === myAddress
+  const li = document.createElement("li")
+  li.id = `msg-${id}`
+  li.className = `message ${mine ? "mine" : "other"}`
+  li.dataset.sender = m.sender ?? ""
 
-  messagesListElement.innerHTML = '';
-  displayedMessageIds.clear();
+  const head = document.createElement("div")
+  head.className = "message-head"
+  const name = document.createElement("button")
+  name.className = "message-name"
+  name.textContent = m.senderName || "anonymous"
+  name.title = "Show only this sender's messages"
+  name.onclick = () => filterBySender(m.sender, m.senderName)
+  const addr = document.createElement("span")
+  addr.className = "message-addr"
+  addr.textContent = m.sender ? db.sm.abbrAddr(m.sender) : "unsigned"
+  head.append(name, addr)
 
-  let filteredMessages = allMessagesData;
-  if (currentSearchTerm) {
-    const lowerSearchTerm = currentSearchTerm.toLowerCase();
-    filteredMessages = allMessagesData.filter(msg =>
-      (msg.value.content.type === 'text' && msg.value.content.value.toLowerCase().includes(lowerSearchTerm)) ||
-      (msg.value.sender.toLowerCase().includes(lowerSearchTerm))
-    );
-  }
+  const del = document.createElement("button")
+  del.className = "message-delete"
+  del.textContent = "×"
+  del.title = "Delete message"
+  del.onclick = () => deleteMessage(id)
+  head.appendChild(del)
 
-  filteredMessages.sort((a, b) => (a.value?.timestamp || 0) - (b.value?.timestamp || 0));
+  const body = document.createElement("div")
+  body.className = "message-body"
+  body.textContent = m.text ?? "" // textContent: XSS-safe by design
 
-  const messagesToRender = currentSearchTerm
-    ? filteredMessages
-    : filteredMessages.slice(- (INITIAL_MESSAGES_TO_SHOW + (parseInt(loadOlderMessagesBtn.dataset.loads || "0")) * MESSAGES_PER_LOAD_MORE));
+  const time = document.createElement("span")
+  time.className = "message-time"
+  time.textContent = new Date(m.timestamp).toLocaleString()
 
-  messagesToRender.forEach(msgData => {
-    const isUserMsg = currentUser && msgData.value.sender === currentUser; // `currentUser` puede ser null
-    const messageElement = createMessageElement(msgData.id, msgData.value, isUserMsg);
-    if (messageElement) {
-      messagesListElement.appendChild(messageElement);
-      displayedMessageIds.add(msgData.id);
-    }
-  });
-
-  if (isInitialLoad || isUserNearBottom || (allMessagesData.length > 0 && currentUser && allMessagesData[allMessagesData.length - 1].value.sender === currentUser)) {
-    scrollToBottom(true);
-  }
-  if (isInitialLoad && messagesToRender.length > 0) isInitialLoad = false;
-
-  const canLoadMore = !currentSearchTerm && messagesToRender.length < filteredMessages.length;
-  loadOlderMessagesBtn.style.display = canLoadMore ? 'block' : 'none';
-  loadOlderMessagesBtn.disabled = !canLoadMore;
+  li.append(head, body, time)
+  return li
 }
 
-const subscribeToAllMessages = async () => {
-  if (unsubscribeFromMainMessages) unsubscribeFromMainMessages();
-  if (unsubscribeFromRecentMessages) unsubscribeFromRecentMessages();
-
-  // No hay `if (!currentUser) return;` aquí.
-
-  isInitialLoad = true;
-  allMessagesData = [];
-  uniqueSenders.clear(); // Limpiar para repopular con datos frescos
-  loadOlderMessagesBtn.dataset.loads = 0;
-
-  // Main subscription
-  const { unsubscribe: mainUnsub } = await db.map({
-    query: { type: MESSAGE_TYPE },
-    field: 'timestamp', order: 'asc', realtime: true
-  }, ({ id, value, action }) => {
-    if (!value) {
-      if (action === 'removed') {
-        const existingMsgIndex = allMessagesData.findIndex(m => m.id === id);
-        if (existingMsgIndex !== -1) allMessagesData.splice(existingMsgIndex, 1);
-      } else { console.warn(`Acción ${action} para ID ${id} sin 'value'.`); return; }
-    } else {
-      const existingMsgIndex = allMessagesData.findIndex(m => m.id === id);
-      if (action === 'initial' || action === 'added') {
-        if (existingMsgIndex === -1) {
-          allMessagesData.push({ id, value });
-          if (value.sender) uniqueSenders.add(value.sender);
-        }
-      } else if (action === 'updated') {
-        if (existingMsgIndex !== -1) allMessagesData[existingMsgIndex].value = value;
-        else allMessagesData.push({ id, value }); // Si no existe, lo añade
-        if (value.sender) uniqueSenders.add(value.sender);
-      } else if (action === 'removed') {
-        if (existingMsgIndex !== -1) allMessagesData.splice(existingMsgIndex, 1);
-      }
-    }
-    allMessagesData.sort((a, b) => (a.value?.timestamp || 0) - (b.value?.timestamp || 0));
-
-    refreshMainMessageDisplay();
-    renderUserList();
-  });
-  unsubscribeFromMainMessages = mainUnsub;
-
-  // Subscription for recent messages panel
-  let localRecentMessages = [];
-  const { unsubscribe: recentUnsub } = await db.map({
-    query: { type: MESSAGE_TYPE },
-    field: 'timestamp', order: 'desc', $limit: RECENT_MESSAGES_LIMIT, realtime: true
-  }, ({ id, value, action }) => {
-    if (!value) {
-      if (action === 'removed') {
-        const existingIndex = localRecentMessages.findIndex(m => m.id === id);
-        if (existingIndex !== -1) localRecentMessages.splice(existingIndex, 1);
-      } else { console.warn(`Acción ${action} para ID ${id} en recientes sin 'value'.`); return; }
-    } else {
-      const existingIndex = localRecentMessages.findIndex(m => m.id === id);
-      if (action === 'initial' || action === 'added') {
-        if (existingIndex === -1) localRecentMessages.push({ id, value });
-        else localRecentMessages[existingIndex] = { id, value };
-      } else if (action === 'updated') {
-        if (existingIndex !== -1) localRecentMessages[existingIndex].value = value;
-      } else if (action === 'removed') {
-        if (existingIndex !== -1) localRecentMessages.splice(existingIndex, 1);
-      }
-    }
-    localRecentMessages.sort((a, b) => (b.value?.timestamp || 0) - (a.value?.timestamp || 0));
-    if (localRecentMessages.length > RECENT_MESSAGES_LIMIT) {
-      localRecentMessages = localRecentMessages.slice(0, RECENT_MESSAGES_LIMIT);
-    }
-    renderRecentMessages(localRecentMessages);
-  });
-  unsubscribeFromRecentMessages = recentUnsub;
-}
-
-const renderRecentMessages = (recentMessagesArray) => {
-  recentMessagesListElement.innerHTML = '';
-  recentMessagesArray.forEach(msgData => {
-    const li = document.createElement('li');
-    li.className = 'recent-message-item';
-    const isCurrentUserMsg = currentUser && msgData.value.sender === currentUser; // currentUser puede ser null
-    li.classList.toggle('user', isCurrentUserMsg);
-
-    const senderSpan = document.createElement('span');
-    senderSpan.className = 'sender';
-    senderSpan.textContent = `${msgData.value.sender}: `;
-
-    let previewText = '';
-    if (msgData.value.content.type === 'text') {
-      previewText = msgData.value.content.value;
-    } else if (msgData.value.content.type === 'image') {
-      previewText = `[Imagen] ${msgData.value.content.filename || ''}`;
-      if (msgData.value.content.text && msgData.value.content.text.trim() !== '') {
-        previewText += ` "${msgData.value.content.text.substring(0, 20)}..."`;
-      }
-    }
-
-    li.appendChild(senderSpan);
-    li.appendChild(document.createTextNode(previewText.substring(0, 50) + (previewText.length > 50 ? '...' : '')));
-    recentMessagesListElement.appendChild(li);
-  });
-}
-
-const sendMessage = async (contentPayload) => {
-  if (!currentUser) {
-    alert("Establece tu nombre primero para poder enviar mensajes.");
-    whoInput.focus();
-    return;
+const refreshDeleteButtons = () => {
+  for (const li of list.querySelectorAll(".message")) {
+    const mine = myAddress && li.dataset.sender === myAddress
+    li.classList.toggle("can-delete", Boolean((mine && can("delete")) || can("deleteAny")))
+    li.classList.toggle("mine", mine)
+    li.classList.toggle("other", !mine)
   }
-  const messageData = {
-    type: MESSAGE_TYPE,
-    sender: currentUser,
-    content: contentPayload,
-    timestamp: Date.now()
-  };
+}
+
+// Live subscription — paused (ignored) while a search snapshot is on screen.
+db.map({ query: { type: "message" }, field: "timestamp", order: "asc" }, ({ id, value, action }) => {
+  if (searchMode) return
+  const existing = document.getElementById(`msg-${id}`)
+  switch (action) {
+    case "initial":
+    case "added": // chat flows downward: sorted arrival appends
+      if (!existing) list.appendChild(buildMessage(id, value))
+      clearTimeout(scrollTimer)
+      scrollTimer = setTimeout(() => scrollToBottom(action === "initial"), 50)
+      break
+    case "updated":
+      existing?.replaceWith(buildMessage(id, value))
+      break
+    case "removed":
+      existing?.remove()
+      break
+  }
+  refreshDeleteButtons()
+})
+
+// Recent activity widget — a SECOND live subscription with $limit: the
+// engine manages the realtime window (newest five), emitting `removed`
+// for the message that falls out when a newer one arrives.
+const recent = $("recentList")
+const buildRecentItem = (id, m) => {
+  const li = document.createElement("li")
+  li.dataset.id = id
+  li.innerHTML = `<strong></strong><span></span>`
+  li.querySelector("strong").textContent = m.senderName || "anonymous"
+  li.querySelector("span").textContent = (m.text ?? "").slice(0, 42)
+  return li
+}
+
+db.map({ query: { type: "message" }, field: "timestamp", order: "desc", $limit: 5 }, ({ id, value, action }) => {
+  const existing = recent.querySelector(`[data-id="${CSS.escape(id)}"]`)
+  switch (action) {
+    case "initial":
+      recent.appendChild(buildRecentItem(id, value))
+      break
+    case "added":
+      recent.prepend(buildRecentItem(id, value))
+      break
+    case "updated":
+      existing?.replaceWith(buildRecentItem(id, value))
+      break
+    case "removed": // also fired when a message falls OUT of the $limit window
+      existing?.remove()
+      break
+  }
+})
+
+const deleteMessage = async (id) => {
   try {
-    await db.put(messageData);
-    whatInput.value = "";
-    whatInput.focus();
-    scrollToBottom(true);
-  } catch (error) {
-    console.error("Error enviando mensaje:", error);
-    alert("Error al enviar el mensaje.");
+    await db.sm.executeWithPermission("delete")
+    await db.remove(id)
+  } catch (err) {
+    toast(err.message, true)
   }
 }
-messageFormElement.onsubmit = async (event) => {
-  event.preventDefault();
-  const senderName = whoInput.value.trim();
-  const messageText = whatInput.value.trim();
-  if (!senderName) { alert("Ingresa tu nombre."); whoInput.focus(); return; }
-  if (!messageText) { whatInput.focus(); return; }
 
-  if (!currentUser || currentUser !== senderName) {
-    setUser(senderName); // Esto llamará a subscribeToAllMessages
-    // Esperar un momento para que setUser complete la suscripción antes de enviar
-    // Esto es un poco un hack, idealmente setUser devolvería una promesa
-    // o tendríamos un estado más explícito de "listo para enviar".
-    setTimeout(() => sendMessage({ type: 'text', value: messageText }), 100);
-  } else {
-    sendMessage({ type: 'text', value: messageText });
-  }
-};
+// ========================= Search ($text) & filters ========================
+// Search is a STATIC engine query — $text is field-level and accent-folding.
+// The live feed pauses while a snapshot is on screen; Clear resumes it.
 
-emojiBtn.addEventListener('click', () => { emojiPicker.style.display = emojiPicker.style.display === 'none' ? 'block' : 'none'; });
-emojiPicker.addEventListener('emoji-click', event => { whatInput.value += event.detail.unicode; emojiPicker.style.display = 'none'; whatInput.focus(); });
-document.addEventListener('click', (event) => { if (!emojiBtn.contains(event.target) && !emojiPicker.contains(event.target) && emojiPicker.style.display !== 'none') { emojiPicker.style.display = 'none'; } });
-
-imageUploadBtn.addEventListener('click', () => imageFileInput.click());
-imageFileInput.addEventListener('change', (event) => {
-  const file = event.target.files[0];
-  if (file && file.type.startsWith('image/')) {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const senderName = whoInput.value.trim();
-      if (!senderName) { alert("Ingresa tu nombre antes de subir imagen."); whoInput.focus(); imageFileInput.value = ''; return; }
-
-      const payload = { type: 'image', value: e.target.result, filename: file.name };
-      // const textWithImage = prompt("Añadir un texto a la imagen (opcional):", "");
-      // if (textWithImage && textWithImage.trim() !== "") payload.text = textWithImage.trim();
-
-      if (!currentUser || currentUser !== senderName) {
-        setUser(senderName);
-        setTimeout(() => sendMessage(payload), 100); // Similar hack para esperar
-      }
-      else { sendMessage(payload); }
-      imageFileInput.value = '';
-    };
-    reader.readAsDataURL(file);
-  } else if (file) { alert("Archivo de imagen no válido."); imageFileInput.value = ''; }
-});
-
-const showFullImage = (src) => { modalImageContent.src = src; imageModal.style.display = 'flex'; };
-imageModalCloseBtn.onclick = () => { imageModal.style.display = 'none'; modalImageContent.src = ''; };
-imageModal.onclick = (event) => { if (event.target === imageModal) { imageModal.style.display = 'none'; modalImageContent.src = ''; } };
-
-const renderUserList = () => {
-  connectedUsersListElement.innerHTML = '';
-  const sortedSenders = Array.from(uniqueSenders).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
-
-  sortedSenders.forEach(sender => {
-    const li = document.createElement('li');
-    const avatarDetails = getAvatarDetails(sender);
-    const avatarDiv = document.createElement('div');
-    avatarDiv.className = 'user-avatar';
-    avatarDiv.style.backgroundColor = avatarDetails.color;
-    avatarDiv.textContent = avatarDetails.initials;
-
-    const nameSpan = document.createElement('span');
-    nameSpan.className = 'user-name-list';
-    nameSpan.textContent = sender;
-
-    li.appendChild(avatarDiv);
-    li.appendChild(nameSpan);
-
-    if (currentUser && sender === currentUser) { // currentUser puede ser null
-      li.style.fontWeight = 'bold';
-      li.title = "Tú";
-    }
-    connectedUsersListElement.appendChild(li);
-  });
+const enterSearchMode = (title) => {
+  searchMode = true
+  list.innerHTML = ""
+  $("searchBanner").style.display = "flex"
+  $("searchLabel").textContent = title
 }
 
-let searchDebounceTimer;
-searchMessagesInput.addEventListener('input', () => {
-  clearTimeout(searchDebounceTimer);
-  searchDebounceTimer = setTimeout(() => {
-    currentSearchTerm = searchMessagesInput.value.trim();
-    loadOlderMessagesBtn.dataset.loads = 0;
-    refreshMainMessageDisplay();
-  }, 300);
-});
+const exitSearchMode = async () => {
+  searchMode = false
+  $("searchBanner").style.display = "none"
+  $("searchInput").value = ""
+  list.innerHTML = ""
+  // Repaint from a fresh static read; the live subscription resumes deltas.
+  const { results } = await db.map({ query: { type: "message" }, field: "timestamp", order: "asc" })
+  results.forEach((n) => list.appendChild(buildMessage(n.id, n.value)))
+  refreshDeleteButtons()
+  scrollToBottom(true)
+}
 
-loadOlderMessagesBtn.addEventListener('click', () => {
-  const currentLoads = parseInt(loadOlderMessagesBtn.dataset.loads || "0");
-  loadOlderMessagesBtn.dataset.loads = currentLoads + 1;
-  preserveScrollPosition(() => {
-    refreshMainMessageDisplay();
-  });
-});
+$("clearSearchBtn").onclick = () => exitSearchMode()
 
-// --- Initial Load ---
-const preferredTheme = localStorage.getItem(THEME_STORAGE_KEY) || 'light';
-applyTheme(preferredTheme);
-loadUser();
+$("searchForm").onsubmit = async (e) => {
+  e.preventDefault()
+  const term = $("searchInput").value.trim()
+  if (!term) return exitSearchMode()
+  // Full-text search through the ENGINE — not a client-side filter.
+  const { results } = await db.map({
+    query: { type: "message", text: { $text: term } },
+    field: "timestamp", order: "asc",
+  })
+  enterSearchMode(`${results.length} result${results.length === 1 ? "" : "s"} for “${term}”`)
+  results.forEach((n) => list.appendChild(buildMessage(n.id, n.value)))
+  refreshDeleteButtons()
+}
 
-// Se suscribe a los mensajes inmediatamente después de cargar la página.
-// El `setTimeout(0)` ayuda a asegurar que el resto del script se ejecute
-// y el DOM esté listo antes de iniciar las operaciones de DB.
-setTimeout(() => {
-  subscribeToAllMessages();
-}, 0);
+const filterBySender = async (sender, senderName) => {
+  if (!sender) return
+  const { results } = await db.map({
+    query: { type: "message", sender }, // exact-match filter on the signer
+    field: "timestamp", order: "asc",
+  })
+  enterSearchMode(`${results.length} message${results.length === 1 ? "" : "s"} by ${senderName || db.sm.abbrAddr(sender)}`)
+  results.forEach((n) => list.appendChild(buildMessage(n.id, n.value)))
+  refreshDeleteButtons()
+}
 
-// For dev: // db.clear().then(() => { console.log('DB cleared'); localStorage.removeItem(USERNAME_STORAGE_KEY); location.reload(); });
+// ============================== Composer ===================================
+
+$("messageForm").onsubmit = async (e) => {
+  e.preventDefault()
+  const text = $("what").value.trim()
+  if (!text) return
+  try {
+    await db.sm.executeWithPermission("write") // chatting is an earned right
+    const name = $("nameInput").value.trim().slice(0, 24) || "anonymous"
+    await db.sm.acls.set({ type: "message", text, sender: myAddress, senderName: name, timestamp: Date.now() })
+    await bumpMessagesSent()
+    $("what").value = ""
+    $("what").focus()
+  } catch (err) {
+    toast(err.message, true)
+  }
+}
+
+const bumpMessagesSent = async () => {
+  const id = `user:${myAddress}`
+  const { result } = await db.get(id)
+  await db.put({ ...result.value, messagesSent: (result.value.messagesSent ?? 0) + 1 }, id)
+}
+
+// ================================= Boot ====================================
+
+applyPermissionsToUI()
+addEventListener("beforeunload", () => db.room?.leave?.()) // real unload only — never pagehide
