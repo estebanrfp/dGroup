@@ -86,7 +86,6 @@ button {
     flex-direction: column;
     height: 100vh;
     padding: 0 var(--space-5);
-    max-width: 860px;
 }
 
 .top-bar {
@@ -280,7 +279,7 @@ button {
 }
 
 .message {
-    max-width: 78%;
+    max-width: min(78%, 640px);
     background-color: var(--bg-secondary);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-md);
