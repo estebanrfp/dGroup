@@ -87,27 +87,6 @@ const applyPermissionsToUI = () => {
   refreshDeleteButtons()
 }
 
-db.sm.setSecurityStateChangeCallback((state) => {
-  if (state.isActive) {
-    myAddress = state.activeAddress
-    $("identityModal").close()
-    $("identityPanel").style.display = "none"
-    $("sessionBar").style.display = "flex"
-    $("whoami").textContent = state.abbrAddr
-    watchMyRole()
-  } else {
-    unsubRole?.(); unsubRole = null
-    myAddress = myRole = myName = null
-    $("sessionBar").style.display = "none"
-    $("identityPanel").style.display = "block"
-    $("mnemonicBox").readOnly = false
-    $("generateBtn").style.display = "inline-block"
-    $("protectBtn").style.display = "none"
-    $("webauthnLoginBtn").style.display = db.sm.hasExistingWebAuthnRegistration() ? "inline-block" : "none"
-    queueMicrotask(() => applyPermissionsToUI())
-  }
-})
-
 const watchMyRole = async () => {
   unsubRole?.()
   const { unsubscribe } = await db.get(`user:${myAddress}`, (node) => {
@@ -372,6 +351,28 @@ const bumpMessagesSent = async () => {
 }
 
 // ================================= Boot ====================================
+
+// Registered at boot on purpose: GenosDB calls it at once, and a resumed passkey session uses everything declared above.
+db.sm.setSecurityStateChangeCallback((state) => {
+  if (state.isActive) {
+    myAddress = state.activeAddress
+    $("identityModal").close()
+    $("identityPanel").style.display = "none"
+    $("sessionBar").style.display = "flex"
+    $("whoami").textContent = state.abbrAddr
+    watchMyRole()
+  } else {
+    unsubRole?.(); unsubRole = null
+    myAddress = myRole = myName = null
+    $("sessionBar").style.display = "none"
+    $("identityPanel").style.display = "block"
+    $("mnemonicBox").readOnly = false
+    $("generateBtn").style.display = "inline-block"
+    $("protectBtn").style.display = "none"
+    $("webauthnLoginBtn").style.display = db.sm.hasExistingWebAuthnRegistration() ? "inline-block" : "none"
+    queueMicrotask(() => applyPermissionsToUI())
+  }
+})
 
 applyPermissionsToUI()
 addEventListener("beforeunload", () => db.room?.leave?.()) // real unload only — never pagehide
